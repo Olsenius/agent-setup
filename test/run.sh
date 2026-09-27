@@ -206,6 +206,17 @@ t_key_replace() {
 
 # ---------------------------------------------------------------------------------------------------------
 
+t_manual_grant_timeout() {
+  new_home
+  local start=$SECONDS
+  run_install "AGENT_SETUP_REPO_URL=file://$WORK/no-such-repo.git" -- --timeout 2s --no-register --no-link
+  check "no access and no gh admin: exit 2" [ "$RC" -eq 2 ]
+  check "prints the grant command with the public key" output_has "scripts/access-grant.sh --pubkey - --host test-host"
+  check "prints the gh equivalent" output_has "gh repo deploy-key add"
+  check "says to re-run" output_has "re-run after granting"
+  check "respects --timeout" [ $((SECONDS - start)) -lt 20 ]
+}
+
 # known_hosts_in <home> [META_URL]: run only the known_hosts step of install.sh (sourced) in a subshell.
 known_hosts_in() {
   (
@@ -271,6 +282,7 @@ run_test "4 key from AGENT_DEPLOY_KEY_B64" t_key_b64
 run_test "5 key from AGENT_DEPLOY_KEY and --key-file" t_key_env_and_file
 run_test "6 rejected keys" t_key_rejected
 run_test "7 replace key" t_key_replace
+run_test "manual grant timeout" t_manual_grant_timeout
 run_test "known_hosts from api.github.com/meta and fallback" t_known_hosts
 run_test "known_hosts fingerprint mismatch" t_known_hosts_mismatch
 

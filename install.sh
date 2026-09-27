@@ -50,6 +50,8 @@ TMP_PATHS=()
 cleanup() {
   local p
   for p in ${TMP_PATHS[@]+"${TMP_PATHS[@]}"}; do rm -rf "$p"; done
+  # Never leave an admin token behind if we logged gh in and then failed before the normal logout prompt.
+  if [[ ${GH_LOGGED_IN_BY_US:-0} == 1 ]]; then gh auth logout --hostname github.com </dev/null >/dev/null 2>&1 || true; fi
 }
 # make_temp <dir>: create a mode-600 temp file in <dir>; path in $REPLY.
 make_temp() {
@@ -452,7 +454,133 @@ setup_known_hosts() {
   done <<<"$keys"
   info "known_hosts: $added github.com key(s) added, $(($(wc -l <<<"$keys") - added)) already present"
 }
-ensure_access() { :; }
+# ---------------------------------------------------------------------------------------------------------
+# Access
+
+git_ssh_command() {
+  printf 'ssh -i "%s" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15' "$KEY"
+}
+
+has_access() {
+  GIT_SSH_COMMAND=$(git_ssh_command) git ls-remote "$CLONE_URL" HEAD >/dev/null 2>&1 </dev/null
+}
+
+tty_available() {
+  [[ ${AGENT_NONINTERACTIVE:-} != 1 ]] && (: </dev/tty) 2>/dev/null
+}
+
+# ask <question> <default y|n>: read the answer from /dev/tty (never stdin: stdin may be the piped script).
+ask() {
+  local answer hint="[y/N]"
+  [[ $2 == y ]] && hint="[Y/n]"
+  printf '%s %s ' "$1" "$hint" >/dev/tty
+  read -r answer </dev/tty || answer=""
+  answer=${answer:-$2}
+  [[ $answer == [yY]* ]]
+}
+
+gh_is_admin() {
+  command -v gh >/dev/null 2>&1 || return 1
+  gh auth status >/dev/null 2>&1 </dev/null || return 1
+  [[ $(gh api "repos/$OPT_REPO" --jq .permissions.admin 2>/dev/null </dev/null) == true ]]
+}
+
+GH_LOGGED_IN_BY_US=0
+maybe_gh_login() {
+  command -v gh >/dev/null 2>&1 || return 1
+  gh auth status >/dev/null 2>&1 </dev/null && return 1
+  tty_available || return 1
+  ask "gh is installed but not logged in. Log in as a repo admin to register the key automatically?" n || return 1
+  gh auth login </dev/tty >/dev/tty 2>&1 || return 1
+  GH_LOGGED_IN_BY_US=1
+}
+
+maybe_gh_logout() {
+  [[ $GH_LOGGED_IN_BY_US == 1 ]] || return 0
+  if tty_available && ! ask "Log gh out again, so the admin token does not stay on this host?" y; then
+    GH_LOGGED_IN_BY_US=0
+    warn "gh stays logged in on this host"
+    return 0
+  fi
+  GH_LOGGED_IN_BY_US=0
+  gh auth logout --hostname github.com </dev/null >/dev/null 2>&1 || warn "gh auth logout failed"
+  info "gh: logged out"
+}
+
+wait_for_access() { # wait_for_access <seconds> <interval>
+  local deadline=$((SECONDS + $1)) nap
+  while ! has_access; do
+    ((SECONDS < deadline)) || return 1
+    nap=$2
+    if ((deadline - SECONDS < nap)); then nap=$((deadline - SECONDS)); fi
+    if ((nap > 0)); then sleep "$nap"; fi
+  done
+}
+
+auto_grant() {
+  local existing pubfile
+  existing=$(gh repo deploy-key list --repo "$OPT_REPO" --json title,key \
+    --jq ".[] | select(.title == \"$KEY_TITLE\") | .key" </dev/null)
+  if [[ -n $existing ]]; then
+    if [[ $(awk '{ print $1 " " $2 }' <<<"$existing") == "$PUBKEY" ]]; then
+      info "deploy key '$KEY_TITLE' is already registered"
+    else
+      die 6 "a deploy key titled '$KEY_TITLE' exists with a different key. Revoke it first, from the private repo:
+  scripts/access-revoke.sh $HOST
+or with gh:
+  gh repo deploy-key list --repo $OPT_REPO    # find the id
+  gh repo deploy-key delete <id> --repo $OPT_REPO"
+    fi
+  else
+    make_temp "${TMPDIR:-/tmp}"
+    pubfile=$REPLY
+    printf '%s %s\n' "$PUBKEY" "$KEY_TITLE" >"$pubfile"
+    if [[ $OPT_READ_ONLY == 1 ]]; then
+      gh repo deploy-key add "$pubfile" --repo "$OPT_REPO" --title "$KEY_TITLE" </dev/null >/dev/null
+    else
+      gh repo deploy-key add "$pubfile" --repo "$OPT_REPO" --title "$KEY_TITLE" --allow-write </dev/null >/dev/null
+    fi
+    info "registered deploy key '$KEY_TITLE' ($([[ $OPT_READ_ONLY == 1 ]] && echo read-only || echo read-write))"
+  fi
+  wait_for_access 60 5 || die 2 "deploy key registered, but access still fails after 60s; re-run in a minute"
+}
+
+manual_grant() {
+  local write_flag="" ro_flag=""
+  if [[ $OPT_READ_ONLY == 1 ]]; then ro_flag=" --read-only"; else write_flag=" --allow-write"; fi
+  cat <<EOF
+
+This host needs access to $OPT_REPO. On the admin machine, run ONE of:
+
+  # in a clone of the private repo
+  echo '$PUBKEY $KEY_TITLE' | scripts/access-grant.sh --pubkey - --host $HOST$ro_flag
+
+  # or with gh only
+  echo '$PUBKEY $KEY_TITLE' > $KEY_TITLE.pub
+  gh repo deploy-key add $KEY_TITLE.pub --repo $OPT_REPO --title $KEY_TITLE$write_flag
+
+Public key fingerprint: $(fingerprint "$PUBKEY")
+Waiting up to $OPT_TIMEOUT for access (checking every 10s; Ctrl-C to stop, then re-run later)...
+EOF
+  wait_for_access "$GRANT_TIMEOUT" 10 || die 2 "timed out after $OPT_TIMEOUT waiting for access; re-run after granting"
+  info "access granted"
+}
+
+ensure_access() {
+  if is_dry; then
+    would "check access with git ls-remote $CLONE_URL, and register the key or wait for a grant if needed"
+    return 0
+  fi
+  if has_access; then
+    info "access: the key can read $OPT_REPO"
+    return 0
+  fi
+  if gh_is_admin || { maybe_gh_login && gh_is_admin; }; then
+    auto_grant
+  else
+    manual_grant
+  fi
+}
 clone_or_update() { :; }
 apply_config() { :; }
 run_private_scripts() { :; }
@@ -495,6 +623,7 @@ main() {
   step "Git config"
   apply_config
   run_private_scripts
+  maybe_gh_logout
   if is_dry; then
     info "Dry run complete: nothing was changed."
   fi
