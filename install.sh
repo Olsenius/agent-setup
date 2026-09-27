@@ -250,9 +250,157 @@ resolve_host() {
 }
 
 # ---------------------------------------------------------------------------------------------------------
+# Deploy key. The private key is never printed: only the public key and its fingerprint.
+
+ensure_ssh_dir() {
+  [[ -d $SSH_DIR ]] && return 0
+  if is_dry; then
+    would "create $SSH_DIR (mode 700)"
+  else
+    mkdir -m 700 "$SSH_DIR"
+  fi
+}
+
+# pubkey_of <private key file>: "type base64" on stdout; fails if malformed or passphrase-protected.
+pubkey_of() {
+  local out
+  out=$(ssh-keygen -y -P '' -f "$1" 2>/dev/null </dev/null) || return 1
+  [[ -n $out ]] || return 1
+  printf '%s\n' "$out" | awk '{ print $1 " " $2 }'
+}
+
+# fingerprint <"type base64">: SHA256 fingerprint.
+fingerprint() {
+  local t
+  make_temp "${TMPDIR:-/tmp}"
+  t=$REPLY
+  printf '%s\n' "$1" >"$t"
+  ssh-keygen -lf "$t" 2>/dev/null | awk '{ print $2 }'
+  rm -f "$t"
+}
+
+b64_decode() {
+  if base64 -d </dev/null >/dev/null 2>&1; then base64 -d; else base64 -D; fi
+}
+
+write_pub() {
+  printf '%s %s\n' "$1" "$KEY_TITLE" >"$PUB.tmp"
+  chmod 644 "$PUB.tmp"
+  mv "$PUB.tmp" "$PUB"
+}
+
+# install_supplied_key <file|env|b64>
+install_supplied_key() {
+  local kind=$1 dir tmp value pub existing stamp
+  if is_dry; then dir=${TMPDIR:-/tmp}; else
+    ensure_ssh_dir
+    dir=$SSH_DIR
+  fi
+  make_temp "$dir"
+  tmp=$REPLY
+  case $kind in
+    file)
+      [[ -r $OPT_KEY_FILE ]] || die 4 "cannot read key file: $OPT_KEY_FILE"
+      tr -d '\r' <"$OPT_KEY_FILE" >"$tmp"
+      KEY_SOURCE="key file $OPT_KEY_FILE"
+      ;;
+    env)
+      value=$AGENT_DEPLOY_KEY
+      # Some secret stores flatten newlines to a literal \n.
+      if [[ $value != *$'\n'* && $value == *'\n'* ]]; then value=${value//\\n/$'\n'}; fi
+      printf '%s' "$value" | tr -d '\r' >"$tmp"
+      KEY_SOURCE="AGENT_DEPLOY_KEY"
+      ;;
+    b64)
+      if ! printf '%s' "$AGENT_DEPLOY_KEY_B64" | tr -d '\r\n\t ' | b64_decode >"$tmp" 2>/dev/null; then
+        die 4 "AGENT_DEPLOY_KEY_B64 is not valid base64"
+      fi
+      tr -d '\r' <"$tmp" >"$tmp.lf" && mv "$tmp.lf" "$tmp"
+      KEY_SOURCE="AGENT_DEPLOY_KEY_B64"
+      ;;
+  esac
+  unset AGENT_DEPLOY_KEY AGENT_DEPLOY_KEY_B64 value
+  if [[ -n $(tail -c 1 "$tmp") ]]; then printf '\n' >>"$tmp"; fi
+  chmod 600 "$tmp"
+
+  pub=$(pubkey_of "$tmp") ||
+    die 4 "key is invalid or has a passphrase; deploy keys for agents must be passphrase-less"
+  [[ $pub == "ssh-ed25519 "* ]] ||
+    die 4 "key type is ${pub%% *}; only ssh-ed25519 deploy keys are accepted (what the vault's tooling mints)"
+
+  if [[ -f $KEY ]]; then
+    existing=$(pubkey_of "$KEY" || true)
+    if [[ $existing == "$pub" ]]; then
+      KEY_SOURCE="$KEY_SOURCE (same as existing key)"
+      PUBKEY=$pub
+      if [[ ! -f $PUB ]] && ! is_dry; then write_pub "$pub"; fi
+      return 0
+    fi
+    if [[ $OPT_REPLACE != 1 ]]; then
+      die 4 "supplied key differs from the existing $KEY
+  existing: $(fingerprint "${existing:-unreadable}")
+  supplied: $(fingerprint "$pub")
+Use --replace-key (or AGENT_REPLACE_KEY=1) to replace it; the old pair is kept as .bak-<timestamp>."
+    fi
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    if is_dry; then
+      would "back up $KEY and $PUB to *.bak-$stamp"
+    else
+      mv "$KEY" "$KEY.bak-$stamp"
+      if [[ -f $PUB ]]; then mv "$PUB" "$PUB.bak-$stamp"; fi
+      info "backed up the previous key pair to $KEY.bak-$stamp"
+    fi
+  fi
+  PUBKEY=$pub
+  if is_dry; then
+    would "install the supplied key at $KEY"
+    return 0
+  fi
+  mv "$tmp" "$KEY"
+  write_pub "$pub"
+}
+
+generate_key() {
+  KEY_SOURCE="generated"
+  if is_dry; then
+    would "generate an ed25519 key at $KEY"
+    PUBKEY=""
+    return 0
+  fi
+  ensure_ssh_dir
+  ssh-keygen -q -t ed25519 -N '' -C "$KEY_TITLE" -f "$KEY" </dev/null
+  chmod 600 "$KEY"
+  chmod 644 "$PUB"
+  PUBKEY=$(pubkey_of "$KEY")
+}
+
+use_existing_key() {
+  KEY_SOURCE="existing key"
+  PUBKEY=$(pubkey_of "$KEY") ||
+    die 4 "$KEY is invalid or has a passphrase; move it away or supply a key with --replace-key"
+  [[ $PUBKEY == "ssh-ed25519 "* ]] || die 4 "$KEY is not an ed25519 key"
+  if [[ ! -f $PUB ]] && ! is_dry; then write_pub "$PUBKEY"; fi
+}
+
+resolve_key() {
+  local sources=""
+  [[ -z $OPT_KEY_FILE ]] || sources="$sources --key-file/AGENT_DEPLOY_KEY_FILE"
+  [[ -z ${AGENT_DEPLOY_KEY:-} ]] || sources="$sources AGENT_DEPLOY_KEY"
+  [[ -z ${AGENT_DEPLOY_KEY_B64:-} ]] || sources="$sources AGENT_DEPLOY_KEY_B64"
+  case $sources in
+    *" "*" "*) die 4 "more than one key source set:$sources; supply exactly one" ;;
+    *--key-file*) install_supplied_key file ;;
+    *AGENT_DEPLOY_KEY_B64*) install_supplied_key b64 ;;
+    *AGENT_DEPLOY_KEY*) install_supplied_key env ;;
+    *) if [[ -f $KEY ]]; then use_existing_key; else generate_key; fi ;;
+  esac
+  unset AGENT_DEPLOY_KEY AGENT_DEPLOY_KEY_B64
+  if [[ -n $PUBKEY ]]; then info "key: $KEY ($KEY_SOURCE), $(fingerprint "$PUBKEY")"; fi
+}
+
+# ---------------------------------------------------------------------------------------------------------
 # Steps (filled in by later phases)
 
-resolve_key() { :; }
 setup_known_hosts() { :; }
 ensure_access() { :; }
 clone_or_update() { :; }
@@ -281,6 +429,13 @@ main() {
 
   step "Deploy key"
   resolve_key
+  if [[ $MODE == print-pubkey ]]; then
+    if [[ -n $PUBKEY ]]; then
+      info "$PUBKEY $KEY_TITLE"
+      info "fingerprint: $(fingerprint "$PUBKEY")"
+    fi
+    exit 0
+  fi
   step "GitHub host keys"
   setup_known_hosts
   step "Repo access"
