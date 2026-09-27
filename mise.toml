@@ -1,0 +1,4 @@
+# Tools for linting and tests. Install with: mise install
+[tools]
+shellcheck = "0.11.0"
+shfmt = "3.14.1"
