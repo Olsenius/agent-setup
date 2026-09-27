@@ -7,7 +7,6 @@
 # https://github.com/olsenius/agent-setup (MIT). This file contains no secrets.
 # Only definitions live at the top level; all work happens in main(), called on the last line,
 # so a partially downloaded script does nothing.
-# shellcheck disable=SC2034 # temporary: globals used by steps added in later phases
 
 AGENT_SETUP_VERSION="0.1.0"
 DEFAULT_REPO="olsenius/agent"
@@ -692,8 +691,20 @@ contract_ok() {
   [[ $CONTRACT == "$SUPPORTED_CONTRACT" ]]
 }
 
+# in_repo_env <command...>: run in the clone with this host's identity: AGENT unset (it may hold a list),
+# AGENT_HOST set, TOOLS set only when given (otherwise tool-link.sh auto-detects).
+in_repo_env() {
+  (
+    unset AGENT
+    export AGENT_HOST=$HOST
+    if [[ -n $OPT_TOOLS ]]; then export TOOLS=$OPT_TOOLS; else unset TOOLS; fi
+    cd "$OPT_DIR"
+    "$@" </dev/null
+  )
+}
+
 SCRIPT_FAILED=0
-# run_repo_script <script> [args...]: run a private-repo script with this host's identity.
+# run_repo_script <script> [args...]: run a private-repo script; a failure is reported and remembered.
 run_repo_script() {
   local script=$OPT_DIR/scripts/$1
   shift
@@ -701,15 +712,7 @@ run_repo_script() {
     warn "scripts/${script##*/} not found in $OPT_DIR; skipping"
     return 0
   fi
-  if (
-    unset AGENT
-    export AGENT_HOST=$HOST
-    if [[ -n $OPT_TOOLS ]]; then export TOOLS=$OPT_TOOLS; else unset TOOLS; fi
-    cd "$OPT_DIR"
-    "$script" "$@" </dev/null
-  ); then
-    return 0
-  fi
+  if in_repo_env "$script" "$@"; then return 0; fi
   warn "scripts/${script##*/} $* failed"
   SCRIPT_FAILED=1
 }
@@ -740,7 +743,137 @@ run_private_scripts() {
     if is_dry; then run_repo_script tool-link.sh --dry-run; else run_repo_script tool-link.sh; fi
   fi
 }
-print_status() { :; }
+# ---------------------------------------------------------------------------------------------------------
+# Status
+
+file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+
+STATUS_FAIL=0
+status_line() { # status_line OK|MISSING|WARN <item> <detail>
+  local color=""
+  case $1 in
+    OK) color=$C_GREEN ;;
+    MISSING)
+      color=$C_RED
+      STATUS_FAIL=1
+      ;;
+    WARN) color=$C_YELLOW ;;
+  esac
+  printf '%s%-8s%s %-14s %s\n' "$color" "$1" "$C_RESET" "$2" "$3"
+}
+
+# Read-only: prints one line per item; returns 1 if anything is MISSING.
+print_status() {
+  local missing pub="" mode kh=$SSH_DIR/known_hosts key value current found="" a d out rc=0 cloned=0
+  STATUS_FAIL=0
+
+  missing=$(missing_deps)
+  if [[ -z $missing ]]; then status_line OK dependencies "$REQUIRED_CMDS"; else
+    status_line MISSING dependencies "$missing (install: $(install_hint))"
+  fi
+
+  if [[ $HOST_SOURCE == AGENT_HOST ]]; then
+    status_line OK host "$HOST (from AGENT_HOST)"
+  elif [[ $EPHEMERAL == 1 ]]; then
+    status_line WARN host "$HOST (from hostname; looks ephemeral, set AGENT_HOST)"
+  else
+    status_line OK host "$HOST (from hostname)"
+  fi
+
+  if [[ -f $KEY ]] && pub=$(pubkey_of "$KEY"); then
+    mode=$(file_mode "$KEY")
+    if [[ $mode == 600 ]]; then status_line OK key "$KEY $(fingerprint "$pub")"; else
+      status_line WARN key "$KEY has mode $mode, want 600"
+    fi
+    status_line OK "key source" "${KEY_SOURCE:-on disk}"
+  else
+    pub=""
+    status_line MISSING key "no usable key at $KEY"
+  fi
+
+  if ! uses_github_ssh; then
+    status_line OK known_hosts "not needed for $CLONE_URL"
+  elif [[ -f $kh ]] && grep -q '^github.com ssh-ed25519 ' "$kh"; then
+    status_line OK known_hosts "github.com present in $kh"
+  else
+    status_line MISSING known_hosts "no github.com entry in $kh"
+  fi
+
+  if [[ -n $pub ]] && has_access; then
+    status_line OK "repo access" "git ls-remote $CLONE_URL"
+  else
+    status_line MISSING "repo access" "cannot read $CLONE_URL with $KEY"
+  fi
+
+  if is_clone_of_repo "$OPT_DIR" 2>/dev/null; then
+    cloned=1
+    status_line OK clone "$OPT_DIR (origin $(git -C "$OPT_DIR" remote get-url origin))"
+  elif [[ -e $OPT_DIR ]]; then
+    status_line MISSING clone "$OPT_DIR exists but is not a clone of $OPT_REPO"
+  else
+    status_line MISSING clone "$OPT_DIR not cloned"
+  fi
+
+  if ((cloned)); then
+    while IFS= read -r key && IFS= read -r value; do
+      current=$(git -C "$OPT_DIR" config --local --get "$key" 2>/dev/null || true)
+      if [[ $current == "$value" ]]; then status_line OK "$key" "$value"; else
+        status_line MISSING "$key" "is '${current}', want '$value'"
+      fi
+    done < <(config_pairs)
+
+    if contract_ok; then status_line OK contract "version $CONTRACT"; else
+      status_line MISSING contract "scripts/.setup-contract is $CONTRACT, installer supports $SUPPORTED_CONTRACT"
+    fi
+
+    for d in "$OPT_DIR/90 Agents/91 Workspaces/"*"@$HOST"; do
+      [[ -d $d ]] || continue
+      a=${d##*/}
+      found="$found ${a%@*}"
+    done
+    missing=""
+    for a in ${AGENT_LIST[@]+"${AGENT_LIST[@]}"}; do
+      case " $found " in *" $a "*) ;; *) missing="$missing $a" ;; esac
+    done
+    if [[ -n $missing ]]; then
+      status_line MISSING agents "not registered on $HOST:$missing"
+    elif [[ -n $found ]]; then
+      status_line OK agents "${found# }"
+    else
+      status_line WARN agents "none registered on $HOST (use --agent)"
+    fi
+
+    if [[ $CONTRACT != "$SUPPORTED_CONTRACT" ]]; then
+      status_line WARN tools "not checked: unsupported setup contract"
+    elif [[ -x $OPT_DIR/scripts/tool-link.sh ]]; then
+      out=$(in_repo_env scripts/tool-link.sh --status 2>&1) || rc=$?
+      if ((rc == 0)); then status_line OK tools "tool-link.sh --status:"; else
+        status_line MISSING tools "tool-link.sh --status reported problems:"
+      fi
+      if [[ -n $out ]]; then printf '%s\n' "$out" | sed 's/^/           /'; fi
+    else
+      status_line WARN tools "scripts/tool-link.sh not found"
+    fi
+  fi
+  return "$STATUS_FAIL"
+}
+
+next_steps() {
+  cat <<EOF
+
+Next steps
+  Tools without session hooks (Codex, OpenClaw, Grok, Gemini) sync around each run:
+    cd $OPT_DIR && AGENT=<agent> scripts/agent-sync.sh pull
+    # ... run the tool ...
+    AGENT=<agent> scripts/agent-sync.sh push "<summary>"
+  Claude Code does this through the repo's hooks; Hermes skills do it themselves.
+EOF
+  if [[ $HOST_SOURCE == AGENT_HOST ]]; then
+    info "  This host is '$HOST' (saved in ~/.config/$KEY_TITLE_PREFIX/env). Keep AGENT_HOST=$HOST set for agent runs."
+  elif [[ $EPHEMERAL == 1 ]]; then
+    info "  '$HOST' looks ephemeral: re-run with AGENT_HOST=<stable-name> so the identity survives rebuilds."
+  fi
+}
 
 # ---------------------------------------------------------------------------------------------------------
 
@@ -757,8 +890,7 @@ main() {
   resolve_host
 
   if [[ $MODE == status ]]; then
-    print_status
-    exit $?
+    if print_status; then exit 0; else exit 1; fi
   fi
 
   step "Deploy key"
@@ -783,7 +915,12 @@ main() {
   maybe_gh_logout
   if is_dry; then
     info "Dry run complete: nothing was changed."
+    return 0
   fi
+  step "Status"
+  print_status || true
+  next_steps
+  if [[ $SCRIPT_FAILED == 1 ]]; then die 1 "a private-repo script failed (see warnings above)"; fi
 }
 
 # Sourced (tests): define functions only. Executed or piped: run.

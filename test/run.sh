@@ -287,6 +287,29 @@ t_missing_contract() {
   check "tool-link.sh not called" [ "$(stub_calls tool-link)" -eq 0 ]
 }
 
+t_status() {
+  new_home
+  fake_vault
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --status
+  check "fresh host: --status exits 1" [ "$RC" -eq 1 ]
+  check "fresh host: key MISSING" output_has "MISSING  key"
+  local before
+  before=$(snapshot "$H")
+  check "fresh host: --status changes nothing" [ "$(snapshot "$H")" == "$before" ]
+
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --agent alpha --tools hermes
+  check "install prints the status table" output_has "OK       agentrepo.role"
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --status --agent alpha --tools hermes
+  check "installed host: --status exits 0" [ "$RC" -eq 0 ]
+  check "installed host: lists the agent" output_has "OK       agents"
+  check "installed host: includes tool-link.sh --status" output_has "all tools linked"
+
+  git -C "$H/agent" config --local agentrepo.role human
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --status
+  check "changed config: --status exits 1" [ "$RC" -eq 1 ]
+  check "changed config: reported" output_has "is 'human', want 'agent'"
+}
+
 t_manual_grant_timeout() {
   new_home
   local start=$SECONDS
@@ -367,6 +390,7 @@ run_test "8 full flow against a fake vault" t_full_flow
 run_test "9 re-run is idempotent" t_idempotent
 run_test "10 REPO_DIR is an unrelated repo" t_unrelated_repo_dir
 run_test "11 missing setup contract" t_missing_contract
+run_test "12 status" t_status
 run_test "manual grant timeout" t_manual_grant_timeout
 run_test "known_hosts from api.github.com/meta and fallback" t_known_hosts
 run_test "known_hosts fingerprint mismatch" t_known_hosts_mismatch
