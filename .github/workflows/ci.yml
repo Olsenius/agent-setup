@@ -27,8 +27,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - name: git identity for fixtures
-        run: git config --global init.defaultBranch main
       - name: tests (Linux, default bash)
         if: runner.os == 'Linux'
         run: test/run.sh
