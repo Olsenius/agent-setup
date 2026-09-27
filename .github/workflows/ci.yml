@@ -21,3 +21,12 @@ jobs:
           if ((${#files[@]})); then shellcheck "${files[@]}"; fi
       - name: shfmt
         run: shfmt -d -i 2 -ci .
+
+  known-hosts:
+    # Fetches github.com host keys from api.github.com/meta and via ssh-keyscan, and checks them against the
+    # fingerprints hardcoded in install.sh. Fails if GitHub rotates its keys.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: known_hosts against the real GitHub
+        run: test/run.sh known_hosts

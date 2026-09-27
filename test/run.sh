@@ -4,6 +4,7 @@
 #   test/run.sh [filter]      run tests whose name contains <filter>
 #   SKIP_NETWORK=1            skip tests that need api.github.com / github.com
 #   BASH_BIN=/bin/bash        bash used to run install.sh (CI uses macOS /bin/bash 3.2)
+# shellcheck disable=SC2030,SC2031 # tests change HOME and globals inside subshells on purpose
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -205,6 +206,62 @@ t_key_replace() {
 
 # ---------------------------------------------------------------------------------------------------------
 
+# known_hosts_in <home> [META_URL]: run only the known_hosts step of install.sh (sourced) in a subshell.
+known_hosts_in() {
+  (
+    # shellcheck source=install.sh
+    source "$INSTALL"
+    set -euo pipefail
+    HOME=$1 DRY_RUN=0 SSH_DIR=$1/.ssh CLONE_URL=git@github.com:example/fake-vault.git
+    if [[ -n ${2:-} ]]; then META_URL=$2; fi
+    setup_known_hosts
+  ) >"$OUT" 2>&1
+}
+
+github_fps_match() { # every fingerprint in known_hosts is one of the hardcoded GitHub fingerprints
+  local expected fp n=0
+  expected=$(bash -c "source '$INSTALL'; echo \"\$GITHUB_FINGERPRINTS\"")
+  for fp in $(ssh-keygen -lf "$H/.ssh/known_hosts" | awk '{ print $2 }'); do
+    case " $expected " in *" $fp "*) n=$((n + 1)) ;; *) return 1 ;; esac
+  done
+  [[ $n -eq 3 ]]
+}
+
+t_known_hosts() {
+  skip_network && return 0
+  new_home
+  OUT=$(mktemp "$WORK/out.XXXXXX")
+  known_hosts_in "$H"
+  check "from api.github.com/meta: exit 0" [ $? -eq 0 ]
+  check "3 github.com keys matching GitHub's published fingerprints" github_fps_match
+  known_hosts_in "$H"
+  check "re-run adds nothing" [ "$(wc -l <"$H/.ssh/known_hosts" | tr -d ' ')" -eq 3 ]
+
+  new_home
+  known_hosts_in "$H" "https://invalid.invalid/meta"
+  check "ssh-keyscan fallback: exit 0" [ $? -eq 0 ]
+  check "ssh-keyscan fallback: warns" output_has "falling back to ssh-keyscan"
+  check "ssh-keyscan fallback: fingerprints verified" github_fps_match
+}
+
+t_known_hosts_mismatch() {
+  skip_network && return 0
+  new_home
+  OUT=$(mktemp "$WORK/out.XXXXXX")
+  (
+    # shellcheck source=install.sh
+    source "$INSTALL"
+    set -euo pipefail
+    HOME=$H DRY_RUN=0 SSH_DIR=$H/.ssh CLONE_URL=git@github.com:example/fake-vault.git
+    META_URL="https://invalid.invalid/meta" GITHUB_FINGERPRINTS="SHA256:not-githubs-key"
+    setup_known_hosts
+  ) >"$OUT" 2>&1
+  check "fingerprint mismatch: exit 5" [ $? -eq 5 ]
+  check "fingerprint mismatch: nothing written" [ ! -s "$H/.ssh/known_hosts" ]
+}
+
+# ---------------------------------------------------------------------------------------------------------
+
 # shellcheck disable=SC2016 # expands in the child bash
 echo "install.sh tests (bash: $("$BASH_BIN" -c 'echo $BASH_VERSION'))"
 run_test "1 help and version" t_help_version
@@ -214,6 +271,8 @@ run_test "4 key from AGENT_DEPLOY_KEY_B64" t_key_b64
 run_test "5 key from AGENT_DEPLOY_KEY and --key-file" t_key_env_and_file
 run_test "6 rejected keys" t_key_rejected
 run_test "7 replace key" t_key_replace
+run_test "known_hosts from api.github.com/meta and fallback" t_known_hosts
+run_test "known_hosts fingerprint mismatch" t_known_hosts_mismatch
 
 printf '\n%d passed, %d failed, %d skipped\n' "$passed" "$failed" "$skipped"
 [[ $failed -eq 0 ]]

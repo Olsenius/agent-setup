@@ -401,7 +401,57 @@ resolve_key() {
 # ---------------------------------------------------------------------------------------------------------
 # Steps (filled in by later phases)
 
-setup_known_hosts() { :; }
+# True when the clone goes over SSH to github.com (the normal case; tests use file:// URLs).
+uses_github_ssh() {
+  [[ $CLONE_URL == git@github.com:* || $CLONE_URL == ssh://git@github.com/* ]]
+}
+
+# github_host_keys: "type base64" lines for github.com. Prefers GitHub's published list over TLS; falls back to
+# ssh-keyscan and then requires every key to match GITHUB_FINGERPRINTS (exit 5 on any mismatch).
+github_host_keys() {
+  local meta keys line fp
+  if meta=$(curl -fsSL --max-time 20 "$META_URL" 2>/dev/null); then
+    keys=$(grep -oE '"(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+"' <<<"$meta" | tr -d '"' || true)
+    if [[ -n $keys ]]; then
+      printf '%s\n' "$keys"
+      return 0
+    fi
+  fi
+  warn "could not read ssh_keys from $META_URL; falling back to ssh-keyscan with fingerprint verification"
+  keys=$(ssh-keyscan -t ed25519,ecdsa,rsa github.com 2>/dev/null </dev/null |
+    awk '$1 == "github.com" { print $2 " " $3 }' || true)
+  [[ -n $keys ]] || die 5 "ssh-keyscan returned no host keys for github.com"
+  while IFS= read -r line; do
+    fp=$(fingerprint "$line")
+    case " $GITHUB_FINGERPRINTS " in
+      *" $fp "*) ;;
+      *) die 5 "github.com host key $fp does not match GitHub's published fingerprints; aborting" ;;
+    esac
+  done <<<"$keys"
+  printf '%s\n' "$keys"
+}
+
+setup_known_hosts() {
+  local kh=$SSH_DIR/known_hosts keys line added=0
+  if ! uses_github_ssh; then
+    info "known_hosts: not needed for $CLONE_URL"
+    return 0
+  fi
+  if is_dry; then
+    would "add github.com host keys from $META_URL to $kh"
+    return 0
+  fi
+  keys=$(github_host_keys)
+  ensure_ssh_dir
+  touch "$kh"
+  while IFS= read -r line; do
+    if ! grep -qxF "github.com $line" "$kh"; then
+      printf 'github.com %s\n' "$line" >>"$kh"
+      added=$((added + 1))
+    fi
+  done <<<"$keys"
+  info "known_hosts: $added github.com key(s) added, $(($(wc -l <<<"$keys") - added)) already present"
+}
 ensure_access() { :; }
 clone_or_update() { :; }
 apply_config() { :; }
