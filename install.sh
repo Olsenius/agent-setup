@@ -581,9 +581,165 @@ ensure_access() {
     manual_grant
   fi
 }
-clone_or_update() { :; }
-apply_config() { :; }
-run_private_scripts() { :; }
+# ---------------------------------------------------------------------------------------------------------
+# Clone, config, and the private repo's scripts
+
+# origin_matches <url>: the URL points at OPT_REPO (SSH or HTTPS form), or equals the test-only override.
+origin_matches() {
+  if [[ -n ${AGENT_SETUP_REPO_URL:-} ]]; then
+    [[ $1 == "$AGENT_SETUP_REPO_URL" ]]
+    return
+  fi
+  local u
+  u=$(lower "$1")
+  u=${u%/}
+  u=${u%.git}
+  u=${u#git@github.com:}
+  u=${u#ssh://git@github.com/}
+  u=${u#https://github.com/}
+  [[ $u == "$(lower "$OPT_REPO")" ]]
+}
+
+is_clone_of_repo() { # is_clone_of_repo <dir>: a work tree rooted exactly at <dir> whose origin is the repo
+  local top origin
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [[ $(cd "$top" && pwd -P) == "$(cd "$1" && pwd -P)" ]] || return 1
+  origin=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
+  origin_matches "$origin"
+}
+
+clone_or_update() {
+  if [[ ! -e $OPT_DIR ]] || [[ -d $OPT_DIR && -z $(ls -A "$OPT_DIR") ]]; then
+    if is_dry; then
+      would "clone $CLONE_URL to $OPT_DIR"
+      return 0
+    fi
+    GIT_SSH_COMMAND=$(git_ssh_command) git clone -q "$CLONE_URL" "$OPT_DIR" </dev/null
+    info "cloned $OPT_REPO to $OPT_DIR"
+    return 0
+  fi
+  if ! is_clone_of_repo "$OPT_DIR"; then
+    die 7 "$OPT_DIR exists but is not a clone of $OPT_REPO; not touching it (use --repo-dir to pick another path)"
+  fi
+  if is_dry; then
+    would "git pull --rebase --autostash in $OPT_DIR"
+    return 0
+  fi
+  # Unpushed local commits are rebased, never reset; nothing is ever force-pushed.
+  if GIT_SSH_COMMAND=$(git_ssh_command) git -C "$OPT_DIR" pull -q --rebase --autostash </dev/null; then
+    info "updated $OPT_DIR"
+  else
+    git -C "$OPT_DIR" rebase --abort >/dev/null 2>&1 || true
+    warn "git pull failed in $OPT_DIR; left as it was (resolve by hand, then re-run)"
+  fi
+}
+
+# Repo-local config: key/value pairs, always re-applied.
+config_pairs() {
+  printf '%s\n' \
+    "core.sshCommand" "ssh -i ~/.ssh/$KEY_BASENAME -o IdentitiesOnly=yes" \
+    "user.name" "$HOST" \
+    "user.email" "$HOST@$KEY_TITLE_PREFIX.local" \
+    "core.hooksPath" ".githooks" \
+    "agentrepo.role" "agent"
+}
+
+apply_config() {
+  local key value current changed=0
+  if [[ ! -d $OPT_DIR/.git ]]; then
+    is_dry && would "set repo-local git config (sshCommand, identity, hooksPath, agentrepo.role) in $OPT_DIR"
+    return 0
+  fi
+  while IFS= read -r key && IFS= read -r value; do
+    current=$(git -C "$OPT_DIR" config --local --get "$key" 2>/dev/null || true)
+    [[ $current == "$value" ]] && continue
+    if is_dry; then
+      would "git config $key '$value'"
+    else
+      git -C "$OPT_DIR" config --local "$key" "$value"
+      changed=$((changed + 1))
+    fi
+  done < <(config_pairs)
+  is_dry || info "git config: $changed value(s) changed"
+}
+
+# Remember a host name given via AGENT_HOST so later syncs on this host use the same identity.
+save_host_name() {
+  local dir=$HOME/.config/$KEY_TITLE_PREFIX file line
+  [[ $HOST_SOURCE == AGENT_HOST ]] || return 0
+  file=$dir/env
+  line="AGENT_HOST=$HOST"
+  if [[ -f $file ]] && grep -qxF "$line" "$file"; then return 0; fi
+  if is_dry; then
+    would "write $line to $file"
+    return 0
+  fi
+  mkdir -p "$dir"
+  { grep -v '^AGENT_HOST=' "$file" 2>/dev/null || true; } >"$file.tmp"
+  printf '%s\n' "$line" >>"$file.tmp"
+  mv "$file.tmp" "$file"
+  info "saved $line to $file"
+}
+
+CONTRACT="missing"
+contract_ok() {
+  local f=$OPT_DIR/scripts/.setup-contract
+  if [[ ! -f $f ]]; then
+    CONTRACT="missing"
+    return 1
+  fi
+  CONTRACT=$(tr -d '[:space:]' <"$f")
+  [[ $CONTRACT == "$SUPPORTED_CONTRACT" ]]
+}
+
+SCRIPT_FAILED=0
+# run_repo_script <script> [args...]: run a private-repo script with this host's identity.
+run_repo_script() {
+  local script=$OPT_DIR/scripts/$1
+  shift
+  if [[ ! -x $script ]]; then
+    warn "scripts/${script##*/} not found in $OPT_DIR; skipping"
+    return 0
+  fi
+  if (
+    unset AGENT
+    export AGENT_HOST=$HOST
+    if [[ -n $OPT_TOOLS ]]; then export TOOLS=$OPT_TOOLS; else unset TOOLS; fi
+    cd "$OPT_DIR"
+    "$script" "$@" </dev/null
+  ); then
+    return 0
+  fi
+  warn "scripts/${script##*/} $* failed"
+  SCRIPT_FAILED=1
+}
+
+run_private_scripts() {
+  local a
+  if [[ ! -d $OPT_DIR/.git ]]; then
+    if is_dry; then would "check scripts/.setup-contract, register agents, and link tools"; fi
+    return 0
+  fi
+  step "Setup contract"
+  if ! contract_ok; then
+    warn "scripts/.setup-contract is $CONTRACT; this installer supports version $SUPPORTED_CONTRACT."
+    warn "Skipping agent registration and tool links. Update the installer (or the private repo), then re-run."
+    return 0
+  fi
+  info "contract: version $CONTRACT"
+
+  if [[ $NO_REGISTER == 0 && ${#AGENT_LIST[@]} -gt 0 ]]; then
+    step "Register agents"
+    for a in "${AGENT_LIST[@]}"; do
+      [[ -n $a ]] || continue
+      if is_dry; then would "run scripts/agent-register.sh $a (AGENT_HOST=$HOST)"; else run_repo_script agent-register.sh "$a"; fi
+    done
+  fi
+  if [[ $NO_LINK == 0 ]]; then
+    step "Link tools"
+    if is_dry; then run_repo_script tool-link.sh --dry-run; else run_repo_script tool-link.sh; fi
+  fi
+}
 print_status() { :; }
 
 # ---------------------------------------------------------------------------------------------------------
@@ -622,6 +778,7 @@ main() {
   clone_or_update
   step "Git config"
   apply_config
+  save_host_name
   run_private_scripts
   maybe_gh_logout
   if is_dry; then

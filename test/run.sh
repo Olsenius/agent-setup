@@ -206,6 +206,87 @@ t_key_replace() {
 
 # ---------------------------------------------------------------------------------------------------------
 
+FIXTURE=$ROOT/test/fixtures/make-fake-vault.sh
+
+# fake_vault [--no-contract]: fresh bare repo; path in $VAULT, clone URL in $VAULT_URL, empty stub log.
+fake_vault() {
+  local d
+  d=$(mktemp -d "$WORK/vault.XXXXXX")
+  VAULT=$("$FIXTURE" "$d" "$@")
+  VAULT_URL="file://$VAULT"
+  : >"$WORK/stub.log"
+}
+stub_log_has() { grep -qF -- "$1" "$WORK/stub.log"; }
+stub_calls() { grep -c "^$1 " "$WORK/stub.log" || true; }
+cfg() { git -C "$H/agent" config --local --get "$1"; }
+cksum_of() { cksum <"$1" | awk '{ print $1 }'; }
+
+t_full_flow() {
+  new_home
+  fake_vault
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" "TOOLS=hermes,grok" -- --agent alpha,beta
+  check "exit 0" [ "$RC" -eq 0 ]
+  check "cloned to ~/agent" [ -f "$H/agent/README.md" ]
+  check "core.sshCommand" [ "$(cfg core.sshCommand)" == "ssh -i ~/.ssh/olsenius-agent_ed25519 -o IdentitiesOnly=yes" ]
+  check "user.name" [ "$(cfg user.name)" == test-host ]
+  check "user.email" [ "$(cfg user.email)" == test-host@olsenius-agent.local ]
+  check "core.hooksPath" [ "$(cfg core.hooksPath)" == .githooks ]
+  check "agentrepo.role" [ "$(cfg agentrepo.role)" == agent ]
+  check "agent-register.sh alpha with AGENT_HOST" stub_log_has "agent-register args=alpha AGENT_HOST=test-host AGENT="
+  check "agent-register.sh beta with AGENT_HOST" stub_log_has "agent-register args=beta AGENT_HOST=test-host AGENT="
+  check "agent-sync.sh pull with AGENT and AGENT_HOST" stub_log_has "agent-sync args=pull AGENT=alpha AGENT_HOST=test-host"
+  check "tool-link.sh with TOOLS and AGENT_HOST" stub_log_has "tool-link args= TOOLS=hermes,grok AGENT_HOST=test-host AGENT="
+  check "AGENT_HOST saved for later syncs" grep -qx "AGENT_HOST=test-host" "$H/.config/olsenius-agent/env"
+  check "no known_hosts needed for file:// URL" output_has "known_hosts: not needed"
+}
+
+t_idempotent() {
+  new_home
+  fake_vault
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --agent alpha --tools hermes
+  local head config commits calls
+  head=$(git -C "$H/agent" rev-parse HEAD)
+  commits=$(git -C "$H/agent" rev-list --count HEAD)
+  config=$(cksum_of "$H/agent/.git/config")
+  calls=$(stub_calls agent-register)
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --agent alpha --tools hermes
+  check "re-run exit 0" [ "$RC" -eq 0 ]
+  check "no new commits" [ "$(git -C "$H/agent" rev-list --count HEAD)" -eq "$commits" ]
+  check "HEAD unchanged" [ "$(git -C "$H/agent" rev-parse HEAD)" == "$head" ]
+  check "git config unchanged" [ "$(cksum_of "$H/agent/.git/config")" == "$config" ]
+  check "reports 0 config changes" output_has "git config: 0 value(s) changed"
+  check "stubs called again" [ "$(stub_calls agent-register)" -gt "$calls" ]
+  check "the key was reused" output_has "existing key"
+}
+
+t_unrelated_repo_dir() {
+  new_home
+  fake_vault
+  mkdir -p "$H/other"
+  git -C "$H/other" init -q
+  git -C "$H/other" remote add origin https://github.com/someone/else.git
+  local before
+  before=$(snapshot "$H/other")
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --repo-dir "$H/other"
+  check "exit 7" [ "$RC" -eq 7 ]
+  check "unrelated repo untouched" [ "$(snapshot "$H/other")" == "$before" ]
+
+  mkdir -p "$H/notgit"
+  echo keep >"$H/notgit/file"
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --repo-dir "$H/notgit"
+  check "non-empty non-git dir: exit 7" [ "$RC" -eq 7 ]
+}
+
+t_missing_contract() {
+  new_home
+  fake_vault --no-contract
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --agent alpha --tools hermes
+  check "exit 0" [ "$RC" -eq 0 ]
+  check "warns about the contract" output_has "setup-contract is missing"
+  check "agent-register.sh not called" [ "$(stub_calls agent-register)" -eq 0 ]
+  check "tool-link.sh not called" [ "$(stub_calls tool-link)" -eq 0 ]
+}
+
 t_manual_grant_timeout() {
   new_home
   local start=$SECONDS
@@ -282,6 +363,10 @@ run_test "4 key from AGENT_DEPLOY_KEY_B64" t_key_b64
 run_test "5 key from AGENT_DEPLOY_KEY and --key-file" t_key_env_and_file
 run_test "6 rejected keys" t_key_rejected
 run_test "7 replace key" t_key_replace
+run_test "8 full flow against a fake vault" t_full_flow
+run_test "9 re-run is idempotent" t_idempotent
+run_test "10 REPO_DIR is an unrelated repo" t_unrelated_repo_dir
+run_test "11 missing setup contract" t_missing_contract
 run_test "manual grant timeout" t_manual_grant_timeout
 run_test "known_hosts from api.github.com/meta and fallback" t_known_hosts
 run_test "known_hosts fingerprint mismatch" t_known_hosts_mismatch
