@@ -1,18 +1,18 @@
 # agent-setup
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/olsenius/agent-setup/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Olsenius/agent-setup/main/install.sh | bash
 ```
 
 One script, `install.sh`, that turns a fresh VM, VPS, or Cursor-hosted box into a working agent host for the
-private repo `olsenius/agent` (a shared Obsidian vault with agent skills). It needs no secrets from this repo:
+private repo `Olsenius/agent` (a shared Obsidian vault with agent skills). It needs no secrets from this repo:
 each host gets its own GitHub deploy key, generated on the host or injected by the platform's secret store.
 
 ## Usage
 
 ```bash
 # Interactive or automatic (gh logged in as repo admin): generate key, register it, clone, link
-curl -fsSL https://raw.githubusercontent.com/olsenius/agent-setup/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Olsenius/agent-setup/main/install.sh | bash
 
 # With flags (`bash -s --` is required to pass flags through a pipe)
 curl -fsSL .../install.sh | bash -s -- --agent chief-of-staff,vigilo --tools grok --host grok-box
@@ -78,7 +78,7 @@ Every option is a flag and an environment variable; flags win.
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
-| `--repo owner/name` | `AGENT_REPO` | `olsenius/agent` | Private repo to clone |
+| `--repo owner/name` | `AGENT_REPO` | `Olsenius/agent` | Private repo to clone |
 | `--repo-dir PATH` | `REPO_DIR` | `~/agent` | Clone location |
 | `--agent a,b` | `AGENT` | none | Agents to register (comma-separated, kebab-case) |
 | `--host NAME` | `AGENT_HOST` | `hostname -s` | Stable host name for key title and namespaces |
@@ -116,7 +116,7 @@ There are deliberately no flags that take a private key: arguments are visible i
 
 ## Contract with the private repo
 
-`install.sh` relies only on this interface of `olsenius/agent`, versioned in `scripts/.setup-contract` (currently `1`):
+`install.sh` relies only on this interface of `Olsenius/agent`, versioned in `scripts/.setup-contract` (currently `1`):
 
 - `scripts/agent-register.sh <agent>`: idempotent, honors `AGENT_HOST`.
 - `scripts/tool-link.sh [--status] [--dry-run]`: honors `TOOLS`, idempotent.
@@ -128,7 +128,7 @@ exits 0. A missing script is skipped with a warning.
 ## Security notes
 
 - **Pipe-to-bash** runs whatever the URL serves. To inspect first:
-  `curl -fsSL https://raw.githubusercontent.com/olsenius/agent-setup/main/install.sh -o install.sh && less install.sh && bash install.sh`
+  `curl -fsSL https://raw.githubusercontent.com/Olsenius/agent-setup/main/install.sh -o install.sh && less install.sh && bash install.sh`
 - **Shell history:** `AGENT_DEPLOY_KEY_B64=... bash` typed interactively lands in your history. Use the platform's
   secret store or `--key-file` instead.
 - The private key is never printed or logged; only the public key and its SHA256 fingerprint are shown.

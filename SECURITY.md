@@ -42,5 +42,5 @@ This repository contains no keys, tokens, host names, or other secrets.
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability reporting on this repository: **Security → Report a vulnerability**
-(https://github.com/olsenius/agent-setup/security/advisories/new). Please do not open a public issue for
+(https://github.com/Olsenius/agent-setup/security/advisories/new). Please do not open a public issue for
 security problems.

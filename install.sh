@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # agent-setup: turn a fresh VM, VPS, or container into an agent host for a private vault repo.
 #
-#   curl -fsSL https://raw.githubusercontent.com/olsenius/agent-setup/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/olsenius/agent-setup/main/install.sh | bash -s -- --help
+#   curl -fsSL https://raw.githubusercontent.com/Olsenius/agent-setup/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Olsenius/agent-setup/main/install.sh | bash -s -- --help
 #
-# https://github.com/olsenius/agent-setup (MIT). This file contains no secrets.
+# https://github.com/Olsenius/agent-setup (MIT). This file contains no secrets.
 # Only definitions live at the top level; all work happens in main(), called on the last line,
 # so a partially downloaded script does nothing.
 
 AGENT_SETUP_VERSION="0.1.0"
-DEFAULT_REPO="olsenius/agent"
+DEFAULT_REPO="Olsenius/agent"
 KEY_BASENAME="olsenius-agent_ed25519"
 KEY_TITLE_PREFIX="olsenius-agent"
 SUPPORTED_CONTRACT="1"
@@ -66,7 +66,7 @@ usage() {
 agent-setup: make this host an agent host for a private vault repo.
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/olsenius/agent-setup/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/Olsenius/agent-setup/main/install.sh | bash
   curl -fsSL .../install.sh | bash -s -- [options]
 
 Examples:
@@ -82,7 +82,7 @@ Examples:
   curl -fsSL .../install.sh | bash -s -- --status
 
 Options (flag / environment variable; flags win):
-  --repo OWNER/NAME     AGENT_REPO             private repo (default: olsenius/agent)
+  --repo OWNER/NAME     AGENT_REPO             private repo (default: Olsenius/agent)
   --repo-dir PATH       REPO_DIR               clone location (default: ~/agent)
   --agent A,B           AGENT                  agents to register (kebab-case)
   --host NAME           AGENT_HOST             stable host name (default: hostname -s)
