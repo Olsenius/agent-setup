@@ -39,7 +39,7 @@ jobs:
     container: alpine:latest
     steps:
       - name: dependencies
-        run: apk add --no-cache bash git openssh-keygen openssh-client curl
+        run: apk add --no-cache bash git openssh-keygen openssh-client curl jq
       - uses: actions/checkout@v7
       - name: tests (Alpine, as root in a container)
         run: bash test/run.sh
