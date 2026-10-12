@@ -39,6 +39,8 @@ echo "agent-sync args=$* AGENT=${AGENT:-} AGENT_HOST=${AGENT_HOST:-}" >>"$STUB_L
 STUB
 
 chmod +x scripts/*.sh
+mkdir -p '00 System/05 Skills/ask-vault'
+printf '%s\n' '---' 'name: ask-vault' 'description: Query the vault.' '---' >'00 System/05 Skills/ask-vault/SKILL.md'
 if [[ $contract == yes ]]; then echo 1 >scripts/.setup-contract; fi
 echo "# fake vault" >README.md
 git add -A

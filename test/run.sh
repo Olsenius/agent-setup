@@ -52,7 +52,7 @@ run_install() {
   if [[ $(id -u) -eq 0 ]]; then root_ok="AGENT_ALLOW_ROOT=1"; fi
   env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u AGENT -u AGENT_HOST -u TOOLS -u AGENT_REPO \
     -u REPO_DIR -u AGENT_DEPLOY_KEY -u AGENT_DEPLOY_KEY_B64 -u AGENT_DEPLOY_KEY_FILE -u SSH_AUTH_SOCK \
-    -u AGENT_SETUP_REPO_URL \
+    -u AGENT_SETUP_REPO_URL -u CODEX_HOME \
     HOME="$H" GH_CONFIG_DIR="$H/.gh" AGENT_NONINTERACTIVE=1 NO_COLOR=1 AGENT_REPO=example/fake-vault \
     AGENT_HOST=test-host STUB_LOG="$WORK/stub.log" $root_ok ${envs[@]+"${envs[@]}"} \
     "$BASH_BIN" "$INSTALL" "$@" </dev/null >"$OUT" 2>&1
@@ -259,6 +259,48 @@ t_idempotent() {
   check "the key was reused" output_has "existing key"
 }
 
+t_codex_hooks() {
+  new_home
+  fake_vault
+  local clone="$H/vault with 'quotes'" file="$H/.codex/hooks.json" before cmd
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex --repo-dir "$clone" --agent codex
+  check "Codex install exits 0" [ "$RC" -eq 0 ]
+  check "user hooks exist" [ -s "$file" ]
+  check "global Codex skill points to vault with quoted path" [ "$(readlink "$H/.agents/skills/ask-vault")" == "$clone/00 System/05 Skills/ask-vault" ]
+  check "global Codex skill is readable outside vault" [ -f "$H/.agents/skills/ask-vault/SKILL.md" ]
+  cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$file")
+  (cd /tmp && STUB_LOG="$WORK/stub.log" "$BASH_BIN" -c "$cmd")
+  check "pull command works outside vault with quoted path" stub_log_has "agent-sync args=pull AGENT=codex"
+  cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$file")
+  (cd /tmp && STUB_LOG="$WORK/stub.log" "$BASH_BIN" -c "$cmd")
+  check "Stop pushes with Codex identity" stub_log_has "agent-sync args=push AGENT=codex"
+  before=$(cksum_of "$file")
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex --repo-dir "$clone"
+  check "Codex re-run exits 0" [ "$RC" -eq 0 ]
+  check "hooks are idempotent" [ "$(cksum_of "$file")" == "$before" ]
+  jq '.hooks.Stop[0].hooks += [{type:"command",command:"true"}]' "$file" >"$file.tmp"
+  mv "$file.tmp" "$file"
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex --repo-dir "$clone"
+  check "unrelated handler preserved" jq -e '.hooks.Stop | any(.[] | .hooks[]; .command == "true")' "$file"
+  check "sync handler is not duplicated" jq -e '[.hooks.Stop[].hooks[] | select(.command | endswith(" # olsenius-agent-sync"))] | length == 1' "$file"
+  before=$(snapshot "$H")
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex --repo-dir "$clone" --dry-run
+  check "Codex dry-run changes nothing" [ "$(snapshot "$H")" == "$before" ]
+  printf 'invalid\n' >"$file"
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex --repo-dir "$clone"
+  check "invalid hooks fail installation" [ "$RC" -eq 1 ]
+  check "invalid hooks left untouched" grep -qx invalid "$file"
+  new_home
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex --no-link
+  check "--no-link skips Codex hooks" [ ! -e "$H/.codex/hooks.json" ]
+  check "--no-link skips global Codex skills" [ ! -e "$H/.agents/skills" ]
+  mkdir -p "$H/.agents/skills/ask-vault"
+  printf 'custom\n' >"$H/.agents/skills/ask-vault/custom.txt"
+  run_install "AGENT_SETUP_REPO_URL=$VAULT_URL" -- --tools codex
+  check "skill conflict fails installation" [ "$RC" -eq 1 ]
+  check "existing skill preserved" grep -qx custom "$H/.agents/skills/ask-vault/custom.txt"
+}
+
 t_unrelated_repo_dir() {
   new_home
   fake_vault
@@ -388,6 +430,7 @@ run_test "6 rejected keys" t_key_rejected
 run_test "7 replace key" t_key_replace
 run_test "8 full flow against a fake vault" t_full_flow
 run_test "9 re-run is idempotent" t_idempotent
+run_test "Codex hooks" t_codex_hooks
 run_test "10 REPO_DIR is an unrelated repo" t_unrelated_repo_dir
 run_test "11 missing setup contract" t_missing_contract
 run_test "12 status" t_status

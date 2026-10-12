@@ -704,6 +704,88 @@ in_repo_env() {
 }
 
 SCRIPT_FAILED=0
+# User-level hooks also work when Codex starts outside the vault. Keep unrelated handlers.
+codex_selected() {
+  if [[ -n $OPT_TOOLS ]]; then
+    case ,$OPT_TOOLS, in *,codex,*) return 0 ;; *) return 1 ;; esac
+  fi
+  command -v codex >/dev/null 2>&1
+}
+
+setup_codex_skills() {
+  codex_selected || return 0
+  local source target name dest="$HOME/.agents/skills"
+  for source in "$OPT_DIR/00 System/05 Skills"/*; do
+    [[ -d $source && -f $source/SKILL.md ]] || continue
+    name=${source##*/}
+    target=$dest/$name
+    if [[ -L $target && $(readlink "$target") == "$source" ]]; then continue; fi
+    if [[ -e $target || -L $target ]]; then
+      warn "Codex skill $target already exists; left untouched."
+      SCRIPT_FAILED=1
+      continue
+    fi
+    if is_dry; then
+      would "link Codex skill $source -> $target"
+    else
+      mkdir -p "$dest"
+      ln -s "$source" "$target"
+      info "Codex skill linked: $name"
+    fi
+  done
+}
+
+setup_codex_hooks() {
+  codex_selected || return 0
+  local dir=${CODEX_HOME:-$HOME/.codex} file quoted command tmp input
+  file=$dir/hooks.json
+  if is_dry; then
+    would "merge Codex SessionStart/Stop vault sync hooks into $file (review with /hooks)"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "Codex hooks need jq; install jq and re-run."
+    SCRIPT_FAILED=1
+    return 0
+  fi
+  if [[ ! -x $OPT_DIR/scripts/agent-sync.sh ]]; then
+    warn "Codex hooks need scripts/agent-sync.sh; skipping"
+    SCRIPT_FAILED=1
+    return 0
+  fi
+  mkdir -p "$dir"
+  # POSIX shell quoting, including spaces and single quotes in the clone path.
+  quoted=$(printf '%s' "$OPT_DIR" | sed "s/'/'\\\\''/g")
+  command="cd '$quoted' && AGENT=codex scripts/agent-sync.sh"
+  make_temp "$dir"
+  tmp=$REPLY
+  input=$file
+  if [[ ! -e $file ]]; then
+    make_temp "$dir"
+    input=$REPLY
+    printf '{}\n' >"$input"
+  fi
+  if ! jq -e --arg command "$command" '
+    def clean:
+      map(.hooks |= map(select((.command // "" | endswith(" # olsenius-agent-sync")) | not)))
+      | map(select(.hooks | length > 0));
+    if type != "object" then error("hooks file must be an object") else . end |
+    .hooks //= {} |
+    .hooks.SessionStart = ((.hooks.SessionStart // [] | clean) +
+      [{hooks: [{type: "command", command: ($command + " pull # olsenius-agent-sync"), timeout: 120}]}]) |
+    .hooks.Stop = ((.hooks.Stop // [] | clean) +
+      [{hooks: [{type: "command", command: ($command + " push # olsenius-agent-sync"), timeout: 180}]}])
+  ' "$input" >"$tmp" 2>/dev/null; then
+    warn "Cannot merge Codex hooks in $file; existing file left untouched."
+    SCRIPT_FAILED=1
+    return 0
+  fi
+  if [[ -f $file ]] && cmp -s "$file" "$tmp"; then return 0; fi
+  if [[ -f $file ]]; then cp -p "$file" "$file.bak-$(date +%Y%m%d%H%M%S)"; fi
+  mv "$tmp" "$file"
+  info "Codex hooks installed in $file; start Codex and review/trust them with /hooks."
+}
+
 # run_repo_script <script> [args...]: run a private-repo script; a failure is reported and remembered.
 run_repo_script() {
   local script=$OPT_DIR/scripts/$1
@@ -741,6 +823,8 @@ run_private_scripts() {
   if [[ $NO_LINK == 0 ]]; then
     step "Link tools"
     if is_dry; then run_repo_script tool-link.sh --dry-run; else run_repo_script tool-link.sh; fi
+    setup_codex_skills
+    setup_codex_hooks
   fi
 }
 # ---------------------------------------------------------------------------------------------------------
@@ -862,11 +946,13 @@ next_steps() {
   cat <<EOF
 
 Next steps
-  Tools without session hooks (Codex, OpenClaw, Grok, Gemini) sync around each run:
+  Tools without configured session hooks (OpenClaw, Grok, Gemini) sync around each run:
     cd $OPT_DIR && AGENT=<agent> scripts/agent-sync.sh pull
     # ... run the tool ...
     AGENT=<agent> scripts/agent-sync.sh push "<summary>"
   Claude Code does this through the repo's hooks; Hermes skills do it themselves.
+  Codex: review/trust the installed SessionStart/Stop hooks with /hooks.
+  Until trusted (or if hooks are disabled), sync Codex manually with AGENT=codex.
 EOF
   if [[ $HOST_SOURCE == AGENT_HOST ]]; then
     info "  This host is '$HOST' (saved in ~/.config/$KEY_TITLE_PREFIX/env). Keep AGENT_HOST=$HOST set for agent runs."

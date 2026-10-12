@@ -52,14 +52,36 @@ Every step is idempotent: re-running converges on the same state.
    `core.hooksPath .githooks`, `agentrepo.role agent`.
 9. **Setup contract:** checks `scripts/.setup-contract` in the clone (see below).
 10. **Register agents:** `scripts/agent-register.sh <agent>` for each `--agent`.
-11. **Link tools:** `scripts/tool-link.sh` (skills and personas into Hermes, OpenClaw, ...).
+11. **Link tools:** `scripts/tool-link.sh` (skills and personas into Hermes, OpenClaw, ...), then install
+    Codex user-level skill links and vault sync hooks when `--tools` includes `codex` or Codex is auto-detected.
 12. **Summary:** the status table and next steps.
 
 ### Never
 
 `sudo`; personal SSH keys or any other key in `~/.ssh`; broad PATs; printing a private key; force-push;
 `git reset --hard`; writing outside `REPO_DIR`, `~/.ssh/olsenius-agent_ed25519*`, `~/.ssh/known_hosts`,
-`~/.config/olsenius-agent/`, and what `tool-link.sh` manages; modifying in-repo symlinks.
+`~/.config/olsenius-agent/`, `~/.agents/skills/`, Codex's `hooks.json` and its backups, and what `tool-link.sh` manages;
+modifying in-repo symlinks.
+
+### Codex skills and hooks
+
+Codex setup links each shared vault skill into `~/.agents/skills/<name>`, making it available
+even when Codex starts outside the vault. Re-running setup leaves matching links unchanged;
+conflicting files or links are preserved and reported as an installation failure. `--dry-run`
+previews the links and `--no-link` skips them. Restart Codex if new skills do not appear.
+
+Codex setup requires `jq` and writes `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`).
+`SessionStart` pulls the vault with `AGENT=codex`; `Stop` pushes allowed vault changes after each turn,
+matching Claude Code's lifecycle. Commands change to the configured clone, so they also work outside it.
+Re-running replaces only this installer's sync handlers, preserves unrelated hooks, and backs up an existing
+file before changing it. Invalid JSON is left untouched and reported as an installation failure.
+`--no-link` skips hooks too; `--dry-run` writes nothing. The installer does not change inline TOML hooks
+or existing project hooks; remove duplicate vault sync hooks if you previously configured them yourself.
+
+Start a new Codex session and use `/hooks` to review and trust both handlers. Codex requires trust of the
+exact definitions before executing them; the installer does not bypass trust or override disabled hooks.
+Until trusted, follow the vault's manual pull/push instructions. See the
+[official hook documentation](https://learn.chatgpt.com/docs/hooks).
 
 ## Onboarding scenarios
 

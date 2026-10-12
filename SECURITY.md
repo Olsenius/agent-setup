@@ -22,6 +22,9 @@ This repository contains no keys, tokens, host names, or other secrets.
   `*.bak-<UTC timestamp>`. Temp files for key validation are created in `~/.ssh` with mode 600 and removed on exit.
 - `~/.ssh/known_hosts`: `github.com` lines are appended if missing.
 - `~/.config/olsenius-agent/env`: `AGENT_HOST=<name>`, only when the host name was given explicitly.
+- Codex's `~/.agents/skills/<name>` symlinks to shared vault skills when Codex is selected. Existing conflicting entries are never replaced.
+- Codex's `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) and timestamped backups when Codex is selected.
+  Only installer-owned sync handlers are replaced. Hook trust and feature settings are not modified.
 - The clone directory (`REPO_DIR`): `git clone` or `git pull --rebase --autostash`, and repo-local git config
   (`core.sshCommand`, `user.name`, `user.email`, `core.hooksPath`, `agentrepo.role`).
 - Whatever the private repo's `scripts/agent-register.sh` and `scripts/tool-link.sh` do (vault commits for new
